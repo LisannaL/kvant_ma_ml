@@ -1,0 +1,388 @@
+---
+title: "Masinõpe KNN näitel paketiga mlr"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: spacelab
+    highlight: tango
+    fig_cap: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Paketid
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(mlr)
+```
+
+Infoks: milliseid õpimeetodeid `mlr` veel võimaldab?
+
+```{r}
+# listLearners()$class 
+# listLearners("classif")$class
+```
+
+# 1. Andmed
+
+Loeme sisse osa [Chapel Hill Expert Survey 2014](https://www.chesdata.eu/2014-chapel-hill-expert-survey) andmestikust Euroopa parlamentide erakondade kohta (Ryan Bakker, Erica Edwards, Liesbet Hooghe, Seth Jolly, Gary Marks, Jonathan Polk, Jan Rovny, Marco Steenbergen, and Milada Vachudova. 2015. “2014 Chapel Hill Expert Survey.”); Bruno Castanho Silva \@ ECPR Winter School 2020
+
+```{r}
+df <- read.csv("data/ches_2014.csv")
+head(df)
+```
+
+-   cname - riik
+
+-   party_name - erakonna lühend
+
+-   lrgen - erakonna positsioon 2014. aastal üldise ideoloogilise hoiaku poolest (0 = *Extreme left*, 10 = *Extreme right*)
+
+-   spendvtax - seisukoht avalike teenuste parandamise vs maksude vähendamise osas (0 = *Fully in favour of raising taxes to increase public services*, 100 = *Fully in favour of cutting public services to cut taxes*)
+
+-   immigrate_policy - seisukoht immigratsioonipoliitika osas (0 = *Fully opposed to a restrictive policy on immigration*, 10 = *Fully in favor of a restrictive policy on immigration*)
+
+Vaatame tunnuste jaotusparameetreid.
+
+```{r}
+psych::describe(df[,3:5])
+```
+
+Kas andmeid oleks vaja standardiseerida? Selleks võib mõelda järgnevate küsimuste peale:
+
+-   Kas jaotused on võrreldavad?
+
+-   Kas hajuvused on võrreldavad?
+
+Eesmärgiks on koostada kNN meetodil mudel, mis klassifitseerib erakonna kas vasak- või parempoolseks. Klassifitseerimise aluseks olevad tunnused peaksid ise olema arvulised, ent klassifitseeriv tunnnus peaks olema **kategoriaalne**. Selleks muudame tunnust *lrgen,* mille algne kuju on arvuline väärtus.
+
+```{r}
+df <- df %>%
+  mutate(lrgen = ifelse(lrgen < 5, 'left','right')) %>% 
+  mutate(lrgen = as.factor(lrgen))
+
+df
+```
+
+Klassifitseerimine toimub kahe tunnuse alusel:
+
+-   *spendvtax* = position on improving public services vs. reducing taxes.
+
+    -   0 = Fully in favour of raising taxes to increase public services
+
+    -   100 = Fully in favour of cutting public services to cut taxes
+
+-   *immigrate_policy* = position on immigration policy.
+
+    -   0 = Fully opposed to a restrictive policy on immigration
+
+    -   10 = Fully in favor of a restrictive policy on immigration
+
+Vaatame, kuidas need tunnused on omavahel ja vasak-parempoolsusega seotud
+
+```{r}
+ggplot(df, aes(spendvtax, immigrate_policy, colour = lrgen)) +
+  geom_point()
+```
+
+Lihtsalt huvi pärast vaatame ka Eesti erakondade paigutust:
+
+```{r}
+df %>% filter(cname == "est") %>% 
+  ggplot(aes(spendvtax, immigrate_policy, colour = lrgen, label = party_name)) +
+  geom_point() +
+  geom_label() +
+  xlim(0, 100) +
+  ylim(0, 10)
+```
+
+Nagu nägime, siis *spendvatx* ja *immigrate_policy* on erinevatel skaaladel, tuleks standardiseerida. Antud juhul sobiks standardiseerimiseks *spendvtax* skaala jagamine 10-ga, sellisel juhul on skaalad ka sisuliselt paremini tõlgendatavad.
+
+```{r}
+df <- df %>% 
+  mutate(spendvtax = spendvtax / 10)
+```
+
+```{r}
+# saanuks siiski ka z-skoorideks teisendamist kasutada
+# df <- df %>% 
+#  mutate(across(where(is.numeric), scale))
+```
+
+Koostame mudeli, kus võtame **k** väärtuseks esmalt 17 (lähim paaritu arv ruutjuurele erakondade arvust andmestikus) ja testime selle täpsust. Selleks eraldame andmed mudeli koostamiseks (n-ö treenimiseks/õpetamiseks) ja testimiseks. Juba eelnevalt on andmestikus ridade järjekord juhuslikustatud, nii et saame siin andmed kaheks eraldada lihtsalt reanumbrite järgi.
+
+```{r}
+df <- df %>% 
+  select(lrgen, spendvtax, immigrate_policy)
+
+train <- df %>% 
+  slice(1:179) 
+
+test <- df %>% 
+  slice(180:268)
+```
+
+# 2. Mudeli koostamine
+
+Kasutame masinõppe meetodeid paketi `mlr` abil, millega saab R-s hõlpsalt KNN-i ja muid masinõppemeetodeid (sh tavalisi regressioonimudeleid) kasutada. Teised sarnased n-ö katuspaketid R-s on `caret` ja `tidymodels`. Paketi `mlr` loogika erinevate masinõppemeetodite puhul on, et kõigepealt paneme paika **ülesande**, mida tahame masinõppega lahendada - antud juhul teatud kahe tunnuse põhjal klassifitseerida erakonnad vasak- ja parempoolseteks. See käib funktsiooniga `makeClassifTask`, kus tuleb defineerida andmed, mida me kasutame (*train*) ja mis on see tunnus, kus on klassikuuluvus.
+
+```{r}
+lrTask <- makeClassifTask(data = train, target = "lrgen")
+lrTask
+```
+
+Seejärel on vaja defineerida **õpimeetod** ehk valida algoritm, mida klassifitseerimisel kasutada koos vajalike argumentidega ehk hüperparameetrite väärtustega. Käib see siis funktsiooniga `makeLearner` ja meetodiks e. algoritmiks valime *knn*. Hüperarameeter, mida saab seadistada on **k**. Alguses me veel ei tea, milline on kõige nö optimaalsem k väärtus.
+
+```{r}
+knn <- makeLearner("classif.knn", k = 17)
+knn
+```
+
+Loome mudeli - rakendame eelnevalt defineeritud meetodi sõnastatud ülesandele ja saame mudeli, millega on pmst võimalik tulevikus uute andmete põhjal järeldusi teha (uute erakondade puhul otsustada, kas tegu on vasak- või parempoolse erakonnaga). Mudeli koostamine käib paketis `mlr` funktsiooniga `train`, mille:
+
+-   esimene argument on [**õpimeetod**]{.underline} (vastav objekt eelnevalt loodud funktsooniga `makeLearner`);
+
+-   teine argument [**ülesanne**]{.underline} (loodud funktsiooniga `makeClassifTask`, millega eelnevalt defineerisime andmed ja klassi tunnuse).
+
+```{r}
+knnModel <- train(knn, lrTask)
+knnModel
+```
+
+Sisuliselt uusi andmeid meil ei ole, aga on testandmed (objekt *test*). Saame testandmete peal kontrollida, kui täpselt loodud mudel, mis võtab arvesse 17 lähima erakonna vasak-parempoolsust (k=17), erakondi klassifitseerib. (Millised on lähimad, otsustatakse erakondade positsioonide alusel maksu- ja immigratsiooniküsimustes).
+
+Klassifitseerimine, milline erakond on vasak- ja milline parempoolne, käib sel juhul funktsiooniga `predict`.
+
+Prognoositud väärtusi saame võrrelda tegeliku klassikuuluvusega.
+
+```{r}
+knnProgn <- predict(knnModel, newdata = test)
+knnProgn
+```
+
+1.  Väljundist on näha, et testandmestikus oli 89 vaatlust ehk rida
+2.  *truth* veerus klassikuuluvuse tegelik väärtus; *response* veerus prognoositud väärtus.
+
+Uurime mudeli täpsust kokkuvõtlikumalt, st kuidas klassifitseeritud väärtused lähevad kokku tegelike väärtustega.
+
+```{r}
+# tegelikud vs porgnoositud väärtused
+table(knnProgn$data$truth, knnProgn$data$response) 
+
+# tegelikud vs porgnoositud väärtused - risttabel
+descr::crosstab(knnProgn$data$truth, knnProgn$data$response, prop.c = T)
+
+#mudel
+performance(knnProgn, measures = list(mmce, acc))
+```
+
+Risttabel võimaldab uurida, kui palju on valenegatiivsete ja valepositiivsete hulk. Sõltuvalt uurimisprobleemist võib meid huvitada rohkem valenegatiivsete või valepositiivsete hulk.
+
+-   Valepositiivne - ilmneb siis, kui mudel ennustab positiivset tulemust, kuid tegelik tulemus on negatiivne. Antud juhul on positiivne väärtus *left*.
+
+-   Valenegatiivne - ilmneb siis, kui mudel ennustab negatiivset tulemust, kuid tegelik tulemus on positiivne.
+
+1.  Tabelist näeme, kui paljude erakondade puhul prognoos läks täppi –\> antud juhul 32 (left) ja 49 (right) puhul läks prognoos täppi. 8 juhul ei läinud täppi – 4 prognoositi vasakuks, aga olid parem; 4 prognoositi paremaks, aga olid vasak.
+
+2.  Kui vaatame prognoose, siis nendest erakondadest, kes prognoositi vasakpoolseks, siis nendest 89% olid vasakpoolsed ja 11% tegelikult parempoolsed.
+
+**mmce** - keskmine liigitamise viga (*mean misclassification error*). Kui suure osa moodustab valenegatiivsete ja valepositiivsete summa kõigist prognoosidest.
+
+**acc** - *accuracy*. eelmise vastandväärtus, täpsete prognooside osakaal.
+
+Praegu klassifitseeriksime ühe erakonna kümnest valesti - kuidas tundub?
+
+# 3. Valideerimine
+
+Siiamaani oleme koostanud mudeli ja selle täpsust ka uurinud. Treening- ja testandmestiku lõime juhuslikkuse alusel algsest andmestikust, aga kui me võtaksime mingi muu osa sellest andmestikust ehk juhuslikkuse alusel valiksime mingid muud erakonnad testandmestiku jaoks, siis võib juhtuda, et saame teistsuguse hinnangu. Seetõttu peaks valideerimist tegema natuke täpsemini.
+
+## *Holdout validation* e. ühekordne valideerimine
+
+Pmst seda juba tegime, kugigi paketi `mlr` funktsioonid annavad ehk mugavamaid võimalusi (nt klassifitseeriva tunnuse alusel kihistamine).
+
+Defineerime meetodi (`holdout`), kui suur osa andmestikust kuulub treeningkogumisse (`split`), kas kihistada valimit (`stratify = T`). Viimane tähendab seda, et kui võtta lihtsalt juhuvalim andmestikust, siis olenevalt juhuslikkusest sinna võib sattuda rohkem või vähem nt vasakpoolseid erakondi, siis kihistamine tähendabki seda, et me ei võta mitte juhuvalimit, vaid võtame kihtvalimi ehk stratifitseeriva tunnuse (vasak-/parempoolsus), siis jagame selle andmestiku kaheks (tunnuseks 2 valikut) ja teeme kummastki kategooriast juhusliku valiku. See tagab selle, et nii treening- kui ka testkogumis on vasak- ja parempoolsete tasakaal sarnane, nagu on see algses andmestikus.
+
+```{r}
+holdout <- makeResampleDesc(method = "Holdout", split = 2/3, stratify = T) 
+holdout
+```
+
+Defineerime uue **ülesande** (`makeClassifTask`), sest eelnevalt jaotasime ise andmestiku kaheks osaks ja õppeülesandeks valisime ainult ühe osa algsest andmestikust; siin saame ülesandes ära määratleda kogu andmestiku ja selle jaotamine õppe- ja testvalimiks toimub valideerimise käigus ehk koostamine toimub juhuslikkuse alusel.
+
+```{r}
+lr_valid <- makeClassifTask(data = df, target = "lrgen")
+lr_valid
+```
+
+Funktsiooniga `resample` saame läbi teha selle mudeli koos valideerimisega. Ette anname **õpimeetodi** (algselt defineeritud *knn*); **ülesande**; paneme paika selle, kust tuleb **valideerimise eeskiri** (`resampling`) ja paneme kirja **mudeli täpsuse näitajad** (`measures`).
+
+Juhuslikkuse tõttu saame siin tõenäoliselt erinevad tulemused. Kui soovida enda tulemust korrata, siis oleks hea kasutada `set.seed()`.
+
+```{r}
+set.seed(123)
+holdoutvalid <- resample(learner = knn, 
+                         task = lr_valid, 
+                         resampling = holdout, # valideerimine
+                         measures = list(mmce, acc))
+holdoutvalid
+```
+
+```{r}
+# mudeli täpsuse näitajad
+holdoutvalid$aggr
+
+# confusion matrix
+calculateConfusionMatrix(holdoutvalid$pred, relative = T) # testkogumi alusel saadud prognoositud väärtused, tahame suhtelisi osakaale
+```
+
+*Confusion Matrixis* on 2 tabelit: suhtelised jaotused ja absoluutarvud. Read tähistavad tegelikke klasse, veerud tähistavad prognoositud klasse.
+
+Sisuliseks tõlgendamiseks saame kasutada valepositiivsete ja valenegatiivsete osakaalu.
+
+-   Nt nendest erakondadest, kes on vasakpoolsed, õigesti prognoositi 89%, 11% puhul prognoositi nad parempoolseteks.
+
+-   Nendest erakondadest, kes olid parempoolsed, õigesti prognoositi 88% ja 12% vasakpoolseteks.
+
+-   Selliste tulemuste puhul saab öelda, et mudel prognoosib mõlemat kategooriat justkui sama hästi.
+
+See oli siis ühekordne valideerimine.
+
+## *k-fold CV*
+
+k-foldi puhul on `resample` funktsiooni mõned k-väärtused sisseehitatud (nt cv5, cv3, cv10) - sel juhul ei pea eelnevalt ise valideerimisskeemi valideerima.
+
+```{r}
+set.seed(22)
+kFold5valid <- resample(learner = knn, 
+                        task = lr_valid, 
+                        resampling = cv5, 
+                        measures = list(mmce, acc))
+kFold5valid
+```
+
+Eelnevas käsus on argumendi resampling väärtuse `cv5` näol tegu sisseehitatud k-fold valideerimise valikuskeemiga, kus andmestik jaotatakse k = 5 osaks. Näeme, et valideerimist on läbi viidud 5 korda. Näidatud on ka kõigi valideerimiste peale keskmised tulemused mudeli kohta.
+
+Kui tahame anda k-le muu väärtuse, tuleb eelnevalt defineerida valikuskeem funktsiooniga `makeResampleDesc`. Valideerimise saab lisaks läbi teha mitu korda, siis on tegu n-ö *repeated k-fold CV*-ga (iter = folds \* reps), vaikeseadena `reps = 10`.
+
+Antud juhul tehakse valideerimine läbi 5\*4 korda.
+
+```{r}
+kFold5_4 <- makeResampleDesc(method = "RepCV", folds = 5, reps = 4, stratify = T)
+kFold5_4
+```
+
+```{r}
+set.seed(12)
+kFold5_4valid <- resample(learner = knn, 
+                          task = lr_valid, 
+                          resampling = kFold5_4, 
+                          measures = list(mmce, acc))
+kFold5_4valid
+```
+
+```{r}
+calculateConfusionMatrix(kFold5_4valid$pred, relative = T)
+```
+
+## *LOOCV*
+
+Kõigepealt defineerimine valideerimisskeemi.
+
+```{r}
+LOO <- makeResampleDesc(method = "LOO")
+LOO
+```
+
+Erakondi ehk andmeridu on suhteliselt vähe, seetõttu ei võta siin *LOOCV* kuigi kaua aega.
+
+```{r}
+set.seed(12)
+LOOvalid <- resample(learner = knn, 
+                     task = lr_valid, 
+                     resampling = LOO, 
+                     measures = list(mmce, acc))
+LOOvalid
+```
+
+```{r}
+calculateConfusionMatrix(LOOvalid$pred, relative = T)
+```
+
+# 4. Optimeerimine
+
+Eelnevast mudeli koostamisest saab õppe kontekstis rääkida vaid tinglikult - andsime ise ette **k** väärtuse ehk mitme lähima naabri liigikuuluvuse alusel indiviid klassifitseeritakse. Me ei ole veel proovinud hüperparameetreid kuidagi optimeerida (*hyperparameter tuning*) ehk pole proovinud leida seda **k** väärtust, mis oleks kõige optimaalsem.
+
+Püüame nüüd ka mudelit optimeerida ehk leida **hüperparameetri** väärtus, mis annaks meile mudeli, mis võimaldaks klassikuuluvust prognoosida võimalikult täpselt, kuid samas ei oleks mudel üle sobitatud.
+
+Antud juhul ongi meil ainult 1 parameeter, mille väärtusi katsetada. Defineerime, milliseid **k** (k nagu kNN, mitte k-fold) väärtusi katsetame:
+
+```{r}
+knnParamSpace <- makeParamSet(makeDiscreteParam("k", values = 3:30))
+knnParamSpace
+```
+
+Paneme paika, kuidas just defineeritud **k**-de hulgast (väärtused 3 kuni 30) erinevaid väärtusi optimeerimisel otsitakse. Antud valik on väga lihtne - proovitakse läbi kõik **k** väärtused. Kui hüperparameetreid on mitu ja neil kõigil palju erinevaid võimalikke väärtuseid, ei pruugi see mõttekas olla ehk võib olla vaja defineerida, kuidas kõiki neid erinavid kombinatsioone läbi proovitakse. Aga antud juhul on see valik ok.
+
+```{r}
+gridSearch <- makeTuneControlGrid()
+gridSearch
+```
+
+Optimeerime mudelit ehk n-ö tuunime hüperparameetrit - teeme klassifitseerimise läbi, katsetades **k** (nagu kNN) väärtusi kolmest 30-ni ning valideerime iga **k** puhul tulemuse *k-fold* valideerimisega, kus andmestik on jaotatud viieks osaks.
+
+`par.set` - hüperparameetrid ja erinevad väärtused, mida läbi proovime
+
+`control` - kuidas hüperparameetrite kogumist erinevaid väärtusi valitakse
+
+Proovitakse käbi kõik **k** väärtused, mis me ette andsime ja arvutatakse näitajad mudeli kohta (keskmine klassifitseerimise viga, täpsus). Andmekogum jaotatakse k-fold ristavlideerimise alusel treening- ja testkogumiks. Iga **k** väärtuse kohta saadakse täpsuse näitaja.
+
+```{r}
+set.seed(12)
+OptimKNN <- tuneParams("classif.knn", 
+                       task = lr_valid, 
+                       resampling = cv5, 
+                       par.set = knnParamSpace, 
+                       control = gridSearch)
+OptimKNN
+```
+
+Antud juhul on optimaalne k=23.
+
+Teeme optimeerimise joonise ka.
+
+```{r}
+OptimKNNres <- generateHyperParsEffectData(OptimKNN)
+
+plotHyperParsEffect(OptimKNNres, 
+                    x = "k", 
+                    y = "mmce.test.mean", 
+                    plot.type = "line")
+```
+
+**Saame siit teada, et täpseima klassifitseerimistulemuse annab milline k väärtus?**
+
+Teeme tulemuse põhjal klassifitseerimisprotsessi näitlikult lõpuni läbi ja treenime lõpliku mudeli (kui peame optimaalseks **k** väärtuseks midagi muud kui see, millel on väikseim *mmce* väärtus, saab selle järgnevas käsus kirja panna nt k = 45 puhul par.vals = list(k = 45)).
+
+```{r}
+TunedKNN <- setHyperPars(makeLearner("classif.knn"), par.vals = OptimKNN$x)
+
+TunedKnnModel <- train(TunedKNN, lr_valid)
+TunedKnnModel
+```
+
+Objektis `TunedKnnModel` on mudel, mida saaksime edaspidi kasutada uutel andmetel, kus klassikuuluvuse tunnust ei ole, st päris andmetel, kus on erakondade kohta hinnangud maksu- ja immigratsiooniküsimustes ilma teabeta, kas tegu on vasak- või parempoolse erakonnaga. Selleks saab kasutada juba eelnevalt kasutatud funktsiooni `predict`, kus argumendile `newdata` omistatakse uus andmestik:
+
+```{r}
+# knnProgn <- predict(TunedKnnModel, newdata = ...)
+```
+
+Lõpuks võib öelda, et võib-olla kõige parema täpsusega meie mudel ei ole. Nimelt kannatab KNN meetod sellise nähtuse all nagu "mitmedimensionaalsuse needus" (*curse of multidimensionality*). Kui meil on väga palju tunnuseid, siis sellisel juhul see KNN meetod ei pruugi suuta võimalikult täpselt prognoose anda - sellisel juhul oleks hea kasutada mingi piiratud arv tunnuseid või siis kuidagi agregeerida neid andmeid.
+
+```{r}
+
+```

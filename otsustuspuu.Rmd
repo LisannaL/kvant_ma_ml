@@ -1,0 +1,229 @@
+---
+title: "Otsustuspuu paketiga mlr"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: spacelab
+    highlight: tango
+    fig_cap: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Otsustuspuu: hüperparameetrid ja pesastatud ristvalideerimine paketiga `mlr`
+
+Aluseks on võetud näide raamatust Rhys, H. (2020) Machine Learning with R, the tidyverse, and mlr. Manning Publications. [**Link O'Reilly andmebaasis**](https://learning.oreilly.com/library/view/machine-learning-with/9781617296574/)(ligipääs TÜ kontoga).
+
+# Paketid
+
+```{r message=FALSE, warning=FALSE}
+library(mlr)
+library(mlbench)
+library(tidyverse)
+library(rpart.plot)
+```
+
+# 1. Andmed
+
+Andmed tulevad paketist `mlbench`, kus on andmestik *zoo*. Andmestikus on 101 looma andmed, kirjeldatud erinevate tunnuste abil. Nende erinevate tunnuste alusel me võiksime saada neid klassifitseerida, st kas tegu imetaja, putuka, kahepaiksega jne.
+
+Loeme andmed sisse.
+
+```{r}
+data(Zoo, package = "mlbench")
+```
+
+Muudame andmetüübi *tibble*'ks. Tibble on dataframe'i laadne tüüp, mis on lihtsalt veidi uuem ja eelis on näiteks see, et andmestiku sisu kuvatakse kompaktsemalt.
+
+```{r}
+zooTib <- as_tibble(Zoo)
+zooTib
+```
+
+Andmestikus on enamus tunnustest nn loogilised ehk väärtus saab olla TRUE/FALSE. See ei sobi hästi `mlr`-le ja seetõttu me muudame need faktori tüüpi tunnusteks. Nüüd on näha, et iga veeru all on kirjas `<fctr>` ehk tegu on kategoriaalsete tunnustega.
+
+```{r}
+zooTib <- mutate_if(zooTib, is.logical, as.factor)
+zooTib
+```
+
+Otsustuspuu meetodi eelis on see, et saame kasutada nii arvulisi kui ka kategoriaalseid tunnuseid.
+
+# 2. Mudel
+
+Tunnuses *type* on kirjas, mis liiki mingi loom täpselt on.
+
+Paneme paika [ülesande]{.underline} ehk **defineerime andmed ja klassifitseerimistunnuse ning algoritmi**. Määratleme andmed ja mis on see tunnus, kus on klassifikatsioon.
+
+```{r warning=FALSE}
+zooTask <- makeClassifTask(data = zooTib, target = "type")
+zooTask
+```
+
+Funktsiooniga `makeLearner` määrame meetodi.
+
+```{r}
+tree <- makeLearner("classif.rpart")
+tree
+```
+
+## Hüperparameetrid
+
+### Ettevalmistus hüperparameetrite tuunimiseks
+
+Uurime, millised hüperparameetrid on otsustuspuu puhul võimalikud. On nii mõndagi, mida tuunida, aga piirdume nende neljaga, millega tutvusime ka loengus.
+
+```{r}
+getParamSet(tree)
+```
+
+kui tahame hüperparameetreid tuunida, on vaja ette anda eelnevad objektid (andmed ja algoritm) ning võimalike hüperparameetrite loend, kuidas nende hulgast hüperparameetrite väärtusi valime ning valideerimise eeskiri.
+
+Anname ette hüperparameetrite loendi, millega mudelit nö tuunida tahame ja nende piirid ehk mis vahemikku jäävaid väärtusi tahame katsetada, st milliste hüperparameetrite juures me võiksime saada kõige täpsema mudeli.
+
+Kasutame funktsiooni `makeParamSet` ja vastava hüperparameetri puhul, siis kas `makeIntegerParam` (hüperparameetri väärtused täisarvulised) või `makeNumericParam` (hüperparameetri väärtused murdarvulised).
+
+```{r}
+treeParamSpace <- makeParamSet(
+  makeIntegerParam("minsplit", lower = 5, upper = 20),
+  makeIntegerParam("minbucket", lower = 3, upper = 10),
+  makeNumericParam("cp", lower = 0.01, upper = 0.1),
+  makeIntegerParam("maxdepth", lower = 3, upper = 10))
+
+treeParamSpace
+```
+
+Kui väärtused on näiteks murdarvulised siis neid erinevaid väärtusi võib olla väga palju. Funktsiooniga `makeTuneControlRandom` paneme paika, kui palju erinevaid hüperparameetrite kombinatsioone me tahame proovida. Praegusel juhul on piiriks 200 ehk 200 korda proovitakse erinevaid hüperparameetrite kombinatsioone.
+
+```{r}
+randSearch <- makeTuneControlRandom(maxit = 200)
+randSearch
+```
+
+Määratleme ka selle, kuidas me valideerime seda mudelit. Siin kasutatakse viiekordset valideerimist.
+
+```{r}
+cvForTuning <- makeResampleDesc("CV", iters = 5)
+cvForTuning
+```
+
+### Hüperparameetrite optimeerimine
+
+`tuneParams` funktsioonis anname ette:
+
+-   `par.set`, mis on objekt kuhu me panime kirja võimalikud hüperparameetrite väärtused;
+
+-   argumendis `control` on see objekt, kuhu me panime kirja, kui palju erinevaid kombinatsioone läbi proovitakse;
+
+-   `resampling` - valideerimise skeem;
+
+-   `tree` - objekt, kus on defineeritud õpimeetod;
+
+-   `task` - objekt, kus meil olid andmed kirja pandud.
+
+```{r}
+tunedTreePars <- tuneParams(learner = tree, 
+                            task = zooTask,
+                            resampling = cvForTuning,
+                            par.set = treeParamSpace,
+                            control = randSearch)
+
+tunedTreePars
+```
+
+Näeme, et eelneva käsu tulemusena on tehtud erinevaid mudeleid läbi erinevate hüperparameetrite kombinatsioonidega. Saime teada mingisuguse hüperparameetrite kombinatsiooni (näha *Tune Result* all), mille puhul keskmine klassifitseerimise viga (*mmce.test.mean*) on kõige väiksem.
+
+Objektis *tunedTreePars* on hüperparameetrite kombinatsioon, kus keskmine klassifitseerimise viga (*mmce.test.mean*) on kõige väiksem.
+
+### Optimeeritud mudeli treenimine
+
+Treenime mudeli eelnevalt leitud parimate hüperparameetrite põhjal. Selleks eraldame hüperparameetrite kombinatsiooni funktsiooniga `setHyperPars`.
+
+```{r}
+tunedTree <- setHyperPars(tree, par.vals = tunedTreePars$x)
+tunedTree
+```
+
+Mudel on objektis *tunedTreeModel*.
+
+```{r}
+tunedTreeModel <- train(tunedTree, zooTask)
+tunedTreeModel
+```
+
+# 3. Otsustuspuu visualiseerimine
+
+Vaatame, milline otsustuspuu tuli. Joonise jaoks vajalikud andmed paneme objekti *treeModelData*.
+
+```{r}
+treeModelData <- getLearnerModel(tunedTreeModel)
+treeModelData
+```
+
+```{r}
+rpart.plot(treeModelData, 
+           box.palette = "BuBn",
+           type = 5)
+```
+
+Joonis aitab meil mõtestada, kuidas erinevad loomad on kategooriate vahel jaotatud. Alumisest reast näeme gruppide osakaale. Näiteks Esimesel tasandil näeme, milline tegur kõige rohkem erinevaid loomi eristab.
+
+Vaatame mudelit lähemalt. `printcp` näitab jagunemiste kaupa, kuidas viga on erinevate jaotamistega vähenenud.
+
+```{r}
+printcp(treeModelData, digits = 3)
+```
+
+Mudeli põhjalik kokkuvõte:
+
+```{r}
+summary(treeModelData)
+```
+
+Edaspidi saaksime seda mudelit uute andmete peal kasutada nii:
+
+```{r}
+# predict(tunedTreeModel, newdata = ...)
+```
+
+# 4. Valideerimine
+
+Selleks, et vea suurust täpsemalt hinnata ei pruugi piisata eelnevalt tehtud valideerimisest. Saame kasutada pesastatud valideerimist (*nested cross-validation*), kus optimaalsete hüperaparameetrite otsing ja nende valideerimine, kaasatakse omakorda mudeli valideerimisse. Valideeritakse kogu mudeli koostamise protsessi integreeritud tervikuna. Kuigi meil oli eelnevalt kriteeriumid sõnastatud (*treeParamSpace*), siis tegelikult me ei integreerinud mudeli valideerimist ja hüperparameetrite otsingu valideerimist kokku.
+
+Järgnevalt aga proovime seda teha. Tulemusels võiks olla realistlik hinnang uute andmete täpsuse osas.
+
+Kasutatakse kahte valideerimisskeemi. Välimine valideerimisskeem, mis defineeritakse objektis *outer* (viiekordne valideerimine).
+
+```{r}
+outer <- makeResampleDesc('CV', iters = 5)
+```
+
+Eraldi pannakse paika hüperparameetrite otsing, kus on omakorda valideerimine sees, mis järgib eelnevalt kirja pandud eeskirja (*cvForTuning*).
+
+```{r}
+treewrapper <- makeTuneWrapper('classif.rpart',
+                               resampling = cvForTuning,
+                               par.set = treeParamSpace,
+                               control = randSearch)
+```
+
+1.  Mida tehakse on see, et hüperparameetrite otsing integreeritakse funktsioonis `resample`, mida kasutasime ka eelnevalt, aga kõigepealt jaotatakse algne andmestik viieks osaks ja võetakse üks treeningandmestik ja selle peal hakatakse seda hüperparameetrite kombinatsiooni otsima.
+
+2.  Selle jaoks treeningandmestik omakorda jaotatakse viieks osaks cvForTuning valideerimise eeskirja järgi, mida kasutatakse selleks, et otsida hüperparameetreid.
+
+3.  Kui hüperparameetrite otsing tehakse läbi, siis hüperparameetrite komplekt, mis saadi, siis selle põhjal koostatakse välises valideerimisskeemis (`resampling = outer`) mudel, mida siis testitakse valideerimisskeemi alusel saadud testkogumil.
+
+    EHK meil on 2 valideerimisskeemi. Üks on mudeli koostamise jaoks ja teine hüperparameetrite otsimiseks. Üks valideerimisskeem on pesastatud teise sees. See peaks tagama selle, et hüperparameetrite otsingut tehakse mitmeid kordi läbi ja selle tulemused edastatakse mudeli koostamisse ja testimisse.
+
+```{r}
+cvWithTuning <- resample(treewrapper, zooTask, resampling = outer)
+cvWithTuning
+```
+
+```{r}
+
+```
